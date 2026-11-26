@@ -735,27 +735,14 @@ async def on_business_connection(connection: BusinessConnection) -> None:
         log.exception("Could not store Business connection (%s)", type(exc).__name__)
 
 
-async def on_business_message(bot: Bot, message: Message) -> None:
-    try:
-        await save_business_message(bot, message)
-    except Exception as exc:
-        log.exception("Could not archive Business message (%s)", type(exc).__name__)
+async def on_business_message(message: Message, bot: Bot) -> None:
 
-
-async def on_edited_business_message(bot: Bot, message: Message) -> None:
-    try:
-        await handle_edited_message(bot, message)
-    except Exception as exc:
-        log.exception("Could not process edited Business message (%s)", type(exc).__name__)
-
+async def on_edited_business_message(message: Message, bot: Bot) -> None:
 
 async def on_deleted_business_messages(
-    bot: Bot, deleted: BusinessMessagesDeleted
+    deleted: BusinessMessagesDeleted,
+    bot: Bot
 ) -> None:
-    try:
-        await handle_deleted_messages(bot, deleted)
-    except Exception as exc:
-        log.exception("Could not process deleted Business messages (%s)", type(exc).__name__)
 
 
 async def main() -> None:
