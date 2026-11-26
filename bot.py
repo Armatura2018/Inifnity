@@ -650,7 +650,10 @@ async def handle_deleted_messages(
         )
 
         try:
-            await bot.send_message(notification_chat, text)
+            await bot.send_message(
+    notification_chat, text,
+    link_preview_options=LinkPreviewOptions(is_disabled=True)
+)
             if row and row["media_type"] and row["media_file_id"]:
                 await send_saved_media(bot, notification_chat, row)
         except TelegramForbiddenError:
