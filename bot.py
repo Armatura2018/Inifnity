@@ -120,23 +120,22 @@ def sender_details(message: Message) -> tuple[str, str | None, int | None]:
 
 
 def message_body(message: Message) -> str:
-    body = message.text or message.caption or ""
-    if body.strip():
-        return body
-    media = media_details(message)
-    if media:
-        labels = {
-            "photo": "Фотография",
-            "video": "Видео",
-            "voice": "Голосовое сообщение",
-            "video_note": "Видеосообщение",
-            "document": "Документ",
-            "animation": "GIF/анимация",
-            "audio": "Аудио",
-            "sticker": "Стикер",
-        }
-        return f"[{labels.get(media['type'], 'Вложение')}]"
-    return "[Сообщение без текста]"
+    # Store only actual text/caption. Media-only messages must not create
+    # artificial placeholders in edit/delete notifications.
+    return message.text or message.caption or ""
+
+
+def quoted_text(label: str, body: str | None, limit: int = 1300) -> str:
+    body = (body or "").strip()
+    # Ignore placeholders written by older versions for media-only messages.
+    legacy_placeholders = {
+        "[Фотография]", "[Видео]", "[Голосовое сообщение]",
+        "[Видеосообщение]", "[Документ]", "[GIF/анимация]",
+        "[Аудио]", "[Стикер]", "[Вложение]", "[Сообщение без текста]",
+    }
+    if not body or body in legacy_placeholders:
+        return ""
+    return f"{label}:\n<blockquote>{safe_html(truncate(body, limit))}</blockquote>\n\n"
 
 
 async def init_db() -> None:
@@ -467,7 +466,9 @@ async def send_saved_media(bot: Bot, chat_id: int, row: aiosqlite.Row) -> None:
 
     local_path = row["media_path"]
     media_input: Any = FSInputFile(local_path) if local_path and Path(local_path).is_file() else file_id
-    caption = truncate(row["caption"] or "", 900) or None
+    # The original caption is shown in the quoted text section of the alert.
+    # Do not duplicate it under the resent attachment.
+    caption = None
 
     try:
         if media_type == "photo":
@@ -513,7 +514,7 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
     )
 
     new_body = message_body(message)
-    old_body = old["body"] if old else "Исходная версия не сохранена (сообщение получено до начала архивации)."
+    old_body = old["body"] if old else ""
     edit_time = int(message.edit_date.timestamp()) if message.edit_date else utc_now()
     fingerprint = hashlib.sha256(new_body.encode("utf-8", "replace")).hexdigest()[:16]
     event_key = f"edit:{connection_id}:{chat_id}:{message_id}:{edit_time}:{fingerprint}"
@@ -531,15 +532,24 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
     text = (
         "✏️ <b>Сообщение отредактировано</b>\n\n"
         f"👤 Собеседник: {safe_html(sender_label)}\n\n"
-        f"📝 Первоначальный текст:\n{safe_html(truncate(old_body, 1300))}\n\n"
-        f"📝 Новая версия:\n{safe_html(truncate(new_body, 1300))}\n\n"
-        f"🕒 Время изменения: {fmt_time(edit_time)}"
+        + quoted_text("📝 Первоначальный текст", old_body)
+        + quoted_text("📝 Новая версия", new_body)
+        + f"🕒 Время изменения: {fmt_time(edit_time)}"
     )
 
     try:
         await bot.send_message(notification_chat, text)
-        # Update stored version only after the old version has been used in the alert.
+        # Store the new version, then resend its attachment only if it exists.
         await save_business_message(bot, message)
+        updated = await db_fetchone(
+            """
+            SELECT * FROM messages
+            WHERE owner_id=? AND connection_id=? AND chat_id=? AND message_id=?
+            """,
+            (owner_id, connection_id, chat_id, message_id),
+        )
+        if updated and updated["media_type"] and updated["media_file_id"]:
+            await send_saved_media(bot, notification_chat, updated)
     except TelegramForbiddenError:
         log.warning("Owner chat is unavailable; ask the owner to send /start")
         await mark_event_failed(event_key)
@@ -580,27 +590,24 @@ async def handle_deleted_messages(
             sender = row["sender_name"] or "Неизвестный отправитель"
             if row["sender_username"]:
                 sender += f" (@{row['sender_username']})"
-            body = row["body"] or "[Содержимое отсутствует]"
+            body = row["body"] or ""
             sent_at = int(row["sent_at"] or 0)
-            media_type = row["media_type"]
         else:
             sender = "Неизвестный отправитель"
-            body = "Содержимое недоступно: сообщение не было сохранено до удаления."
+            body = ""
             sent_at = 0
-            media_type = None
 
         text = (
             "🗑 <b>Сообщение удалено</b>\n\n"
             f"👤 Отправитель: {safe_html(sender)}\n\n"
-            f"📝 Оригинал:\n{safe_html(truncate(body, 2500))}\n\n"
-            f"📎 Вложение: {safe_html(media_type or 'нет')}\n\n"
-            f"📅 Отправлено: {fmt_time(sent_at)}\n\n"
-            f"🕒 Удалено: {fmt_time(utc_now())}"
+            + quoted_text("📝 Оригинал", body, 2500)
+            + f"📅 Отправлено: {fmt_time(sent_at)}\n\n"
+            + f"🕒 Удалено: {fmt_time(utc_now())}"
         )
 
         try:
             await bot.send_message(notification_chat, text)
-            if row and row["media_file_id"]:
+            if row and row["media_type"] and row["media_file_id"]:
                 await send_saved_media(bot, notification_chat, row)
         except TelegramForbiddenError:
             log.warning("Owner chat is unavailable; ask the owner to send /start")
