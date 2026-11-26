@@ -549,10 +549,14 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
         message.sender_chat.id if message.sender_chat else None,
     )
     if not connection_id:
+        log.warning("Edited Business update has no business_connection_id")
         return
     connection = await get_connection(connection_id)
-    if not connection or not connection["is_enabled"]:
-        log.warning("Edited Business update ignored: connection missing or disabled")
+    if not connection:
+        log.warning("Edited Business update ignored: connection not found in database")
+        return
+    if not connection["is_enabled"]:
+        log.warning("Edited Business update ignored: connection is disabled")
         return
 
     owner_id = int(connection["owner_id"])
@@ -579,6 +583,7 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
     event_key = f"edit:{connection_id}:{chat_id}:{message_id}:{edit_time}:{fingerprint}"
 
     if not await claim_event(owner_id, event_key):
+        log.info("Edited Business update ignored: duplicate event")
         return
 
     notification_chat = int(connection["user_chat_id"])
@@ -606,9 +611,11 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
 
     try:
         await bot.send_message(
-    notification_chat, text,
-    link_preview_options=LinkPreviewOptions(is_disabled=True)
-)
+            notification_chat,
+            text,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        log.info("Edit notification sent: chat=%s message=%s", chat_id, message_id)
         # Store the new version, then resend its attachment only if it exists.
         await save_business_message(bot, message)
         updated = await db_fetchone(
@@ -846,6 +853,24 @@ async def cmd_status(message: Message) -> None:
     await message.answer("\n\n".join(lines))
 
 
+async def log_incoming_updates(handler, event: Update, data: dict):
+    """Log only update types/IDs (never message contents) before routing."""
+    for update_type in (
+        "business_connection",
+        "business_message",
+        "edited_business_message",
+        "deleted_business_messages",
+    ):
+        payload = getattr(event, update_type, None)
+        if payload is not None:
+            log.info(
+                "RAW Telegram update: type=%s update_id=%s",
+                update_type,
+                event.update_id,
+            )
+    return await handler(event, data)
+
+
 async def on_business_connection(connection: BusinessConnection) -> None:
     try:
         await store_connection(connection)
@@ -896,6 +921,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+    dp.update.outer_middleware(log_incoming_updates)
 
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_status, Command("status"))
