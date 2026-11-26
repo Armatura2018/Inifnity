@@ -27,6 +27,7 @@ from aiogram.types import (
     FSInputFile,
     Message,
     Update,
+    LinkPreviewOptions,
     BotCommand,
 )
 
@@ -542,7 +543,10 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
     )
 
     try:
-        await bot.send_message(notification_chat, text)
+        await bot.send_message(
+    notification_chat, text,
+    link_preview_options=LinkPreviewOptions(is_disabled=True)
+)
         # Store the new version, then resend its attachment only if it exists.
         await save_business_message(bot, message)
         updated = await db_fetchone(
