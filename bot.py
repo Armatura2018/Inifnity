@@ -736,13 +736,32 @@ async def on_business_connection(connection: BusinessConnection) -> None:
 
 
 async def on_business_message(message: Message, bot: Bot) -> None:
+    try:
+        await save_business_message(bot, message)
+    except Exception as exc:
+        log.exception("Could not archive Business message (%s)", type(exc).__name__)
+
 
 async def on_edited_business_message(message: Message, bot: Bot) -> None:
+    try:
+        await handle_edited_message(bot, message)
+    except Exception as exc:
+        log.exception("Could not process edited Business message (%s)", type(exc).__name__)
+
 
 async def on_deleted_business_messages(
-    deleted: BusinessMessagesDeleted,
-    bot: Bot
+    deleted: BusinessMessagesDeleted, **kwargs: Any
 ) -> None:
+    # aiogram passes the Telegram event positionally and Bot in context kwargs.
+    # Avoid a named `bot` parameter to prevent positional/keyword collisions.
+    bot = kwargs.get("bot")
+    if not isinstance(bot, Bot):
+        log.error("Bot instance is missing from aiogram handler context")
+        return
+    try:
+        await handle_deleted_messages(bot, deleted)
+    except Exception as exc:
+        log.exception("Could not process deleted Business messages (%s)", type(exc).__name__)
 
 
 async def main() -> None:
