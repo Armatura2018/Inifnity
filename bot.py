@@ -573,6 +573,7 @@ async def handle_deleted_messages(
 
     notification_chat = int(connection["user_chat_id"])
     chat_id = deleted.chat.id
+
     for message_id in deleted.message_ids:
         event_key = f"delete:{connection_id}:{chat_id}:{message_id}"
         if not await claim_event(owner_id, event_key):
@@ -586,7 +587,7 @@ async def handle_deleted_messages(
             (owner_id, connection_id, chat_id, message_id),
         )
 
-                if row:
+        if row:
             sender_name = row["sender_name"] or "Неизвестный пользователь"
             sender_username = row["sender_username"]
             sender_id = row["sender_id"]
@@ -599,7 +600,6 @@ async def handle_deleted_messages(
             body = ""
             sent_at = 0
 
-        # Имя и кликабельный username автора
         if sender_username:
             author = (
                 f'<b>{safe_html(sender_name)} '
@@ -617,21 +617,19 @@ async def handle_deleted_messages(
         deleted_at = utc_now()
         lifetime = max(0, deleted_at - sent_at) if sent_at else None
         lifetime_text = (
-            f"прожило {lifetime} сек"
-            if lifetime is not None
-            else "время неизвестно"
+            f"прожило {lifetime} сек" if lifetime is not None else "время неизвестно"
         )
         time_text = datetime.fromtimestamp(
             deleted_at, tz=timezone.utc
         ).astimezone().strftime("%H:%M")
 
         body_quote = ""
-        if body.strip() and body.strip() not in {
+        legacy_placeholders = {
             "[Фотография]", "[Видео]", "[Голосовое сообщение]",
             "[Видеосообщение]", "[Документ]", "[GIF/анимация]",
-            "[Аудио]", "[Стикер]", "[Вложение]",
-            "[Сообщение без текста]",
-        }:
+            "[Аудио]", "[Стикер]", "[Вложение]", "[Сообщение без текста]",
+        }
+        if body.strip() and body.strip() not in legacy_placeholders:
             body_quote = (
                 f"\n\n<blockquote>{safe_html(truncate(body, 2500))}</blockquote>"
             )
