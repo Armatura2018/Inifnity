@@ -20,6 +20,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import Command
+from aiogram.types import LinkPreviewOptions
 from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
@@ -124,7 +125,7 @@ def sender_details(message: Message) -> tuple[str, str | None, int | None]:
 
 
 def is_owner_message(message: Message, owner_id: int) -> bool:
-    """True only when Telegram identifies the connected account as the sender."""
+    """Only treat a message as owner's when Telegram supplies the owner as from_user."""
     return message.from_user is not None and message.from_user.id == owner_id
 
 
@@ -541,20 +542,23 @@ async def send_saved_media(bot: Bot, chat_id: int, row: aiosqlite.Row) -> None:
 
 async def handle_edited_message(bot: Bot, message: Message) -> None:
     connection_id = message.business_connection_id
+    log.info(
+        "Edited Business update received: connection=%s chat=%s message=%s from_user=%s sender_chat=%s",
+        bool(connection_id), message.chat.id, message.message_id,
+        message.from_user.id if message.from_user else None,
+        message.sender_chat.id if message.sender_chat else None,
+    )
     if not connection_id:
         return
     connection = await get_connection(connection_id)
-    if not connection:
-        log.warning("Edited Business message belongs to an unknown connection")
-        return
-    if not connection["is_enabled"]:
-        log.warning("Edited Business message ignored: Business connection is disabled")
+    if not connection or not connection["is_enabled"]:
+        log.warning("Edited Business update ignored: connection missing or disabled")
         return
 
     owner_id = int(connection["owner_id"])
-    # Ignore only messages Telegram explicitly attributes to the connected owner.
+    # Ignore edits to the owner's own outgoing Business messages.
     if is_owner_message(message, owner_id):
-        log.info("Edited Business message ignored because sender is the connection owner")
+        log.info("Edited Business update ignored: message is from connected account")
         return
     chat_id = message.chat.id
     message_id = message.message_id
@@ -569,10 +573,7 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
     new_body = message_body(message)
     old_body = old["body"] if old else ""
     if old is None:
-        log.warning(
-            "Edited Business message has no archived original: connection=%s chat=%s message=%s",
-            connection_id, chat_id, message_id,
-        )
+        log.warning("Edited message was not found in archive; sending notification without old version")
     edit_time = int(message.edit_date.timestamp()) if message.edit_date else utc_now()
     fingerprint = hashlib.sha256(new_body.encode("utf-8", "replace")).hexdigest()[:16]
     event_key = f"edit:{connection_id}:{chat_id}:{message_id}:{edit_time}:{fingerprint}"
@@ -583,16 +584,24 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
     notification_chat = int(connection["user_chat_id"])
     sender_name = old["sender_name"] if old else sender_details(message)[0]
     sender_username = old["sender_username"] if old else sender_details(message)[1]
-    sender_label = sender_name
+    sender_label = safe_html(sender_name)
     if sender_username:
-        sender_label += f" (@{sender_username})"
+        sender_label += f" (@{safe_html(sender_username)})"
+
+    old_display = (old_body or "").strip() or "(пусто)"
+    new_display = (new_body or "").strip() or "(пусто)"
+    old_short = truncate(old_display, 900)
+    new_short = truncate(new_display, 900)
+    time_text = datetime.fromtimestamp(
+        edit_time, tz=timezone.utc
+    ).astimezone(DISPLAY_TIMEZONE).strftime("%H:%M")
 
     text = (
-        "✏️ <b>Сообщение отредактировано</b>\n\n"
-        f"👤 Собеседник: {safe_html(sender_label)}\n\n"
-        + quoted_text("📝 Первоначальный текст", old_body)
-        + quoted_text("📝 Новая версия", new_body)
-        + f"🕒 Время изменения: {fmt_time(edit_time)}"
+        f"✏️ <b>Сообщение изменено</b> · От: <b>{sender_label}</b> · 🕐 {time_text}\n\n"
+        f"🔁 «{safe_html(truncate(old_display, 350))}» → «{safe_html(truncate(new_display, 350))}»\n\n"
+        f"<b>Было:</b>\n<s>{safe_html(old_short)}</s>\n\n"
+        f"<b>Стало:</b>\n<b>{safe_html(new_short)}</b>\n\n"
+        "@infinitysaving_bot"
     )
 
     try:
@@ -636,10 +645,6 @@ async def handle_deleted_messages(
     chat_id = deleted.chat.id
 
     for message_id in deleted.message_ids:
-        event_key = f"delete:{connection_id}:{chat_id}:{message_id}"
-        if not await claim_event(owner_id, event_key):
-            continue
-
         row = await db_fetchone(
             """
             SELECT * FROM messages
@@ -648,8 +653,17 @@ async def handle_deleted_messages(
             (owner_id, connection_id, chat_id, message_id),
         )
 
-        # Ignore owner messages left in the database by an older version.
-        if row and row["sender_id"] == owner_id:
+        # Only messages archived from the counterpart can trigger a deletion alert.
+        # Telegram does not identify who performed the deletion in this update.
+        if row is None:
+            log.info("Deleted message ignored: message was not archived")
+            continue
+        if row["sender_id"] == owner_id:
+            log.info("Deleted message ignored: archived sender matches connection owner")
+            continue
+
+        event_key = f"delete:{connection_id}:{chat_id}:{message_id}"
+        if not await claim_event(owner_id, event_key):
             continue
 
         if row:
@@ -845,30 +859,14 @@ async def on_business_connection(connection: BusinessConnection) -> None:
 
 async def on_business_message(message: Message, bot: Bot) -> None:
     try:
-        log.info(
-            "Received business_message: connection=%s chat=%s message=%s from_user=%s sender_chat=%s",
-            message.business_connection_id,
-            message.chat.id,
-            message.message_id,
-            message.from_user.id if message.from_user else None,
-            message.sender_chat.id if message.sender_chat else None,
-        )
         await save_business_message(bot, message)
     except Exception as exc:
         log.exception("Could not archive Business message (%s)", type(exc).__name__)
 
 
 async def on_edited_business_message(message: Message, bot: Bot) -> None:
+    log.info("Handler entered for edited_business_message: chat=%s message=%s", message.chat.id, message.message_id)
     try:
-        log.info(
-            "Received edited_business_message: connection=%s chat=%s message=%s from_user=%s sender_chat=%s edit_date=%s",
-            message.business_connection_id,
-            message.chat.id,
-            message.message_id,
-            message.from_user.id if message.from_user else None,
-            message.sender_chat.id if message.sender_chat else None,
-            message.edit_date,
-        )
         await handle_edited_message(bot, message)
     except Exception as exc:
         log.exception("Could not process edited Business message (%s)", type(exc).__name__)
