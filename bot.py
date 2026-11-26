@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import Command
+from aiogram.types import LinkPreviewOptions
 from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
@@ -53,6 +54,9 @@ log = logging.getLogger("infinity")
 db: aiosqlite.Connection | None = None
 db_lock = asyncio.Lock()
 
+# All timestamps shown in notifications use fixed UTC+03:00 (GMT+3).
+DISPLAY_TIMEZONE = timezone(timedelta(hours=3))
+
 
 def utc_now() -> int:
     return int(time.time())
@@ -61,7 +65,7 @@ def utc_now() -> int:
 def fmt_time(value: int | None) -> str:
     if not value:
         return "неизвестно"
-    return datetime.fromtimestamp(value, tz=timezone.utc).astimezone().strftime(
+    return datetime.fromtimestamp(value, tz=timezone.utc).astimezone(DISPLAY_TIMEZONE).strftime(
         "%d.%m.%Y %H:%M:%S"
     )
 
@@ -621,7 +625,7 @@ async def handle_deleted_messages(
         )
         time_text = datetime.fromtimestamp(
             deleted_at, tz=timezone.utc
-        ).astimezone().strftime("%H:%M")
+        ).astimezone(DISPLAY_TIMEZONE).strftime("%H:%M")
 
         body_quote = ""
         legacy_placeholders = {
