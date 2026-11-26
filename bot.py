@@ -586,23 +586,61 @@ async def handle_deleted_messages(
             (owner_id, connection_id, chat_id, message_id),
         )
 
-        if row:
-            sender = row["sender_name"] or "Неизвестный отправитель"
-            if row["sender_username"]:
-                sender += f" (@{row['sender_username']})"
+                if row:
+            sender_name = row["sender_name"] or "Неизвестный пользователь"
+            sender_username = row["sender_username"]
+            sender_id = row["sender_id"]
             body = row["body"] or ""
             sent_at = int(row["sent_at"] or 0)
         else:
-            sender = "Неизвестный отправитель"
+            sender_name = "Неизвестный пользователь"
+            sender_username = None
+            sender_id = None
             body = ""
             sent_at = 0
 
+        # Имя и кликабельный username автора
+        if sender_username:
+            author = (
+                f'<b>{safe_html(sender_name)} '
+                f'(<a href="https://t.me/{safe_html(sender_username)}">'
+                f'@{safe_html(sender_username)}</a>)</b>'
+            )
+        elif sender_id:
+            author = (
+                f'<a href="tg://user?id={sender_id}">'
+                f'<b>{safe_html(sender_name)}</b></a>'
+            )
+        else:
+            author = f"<b>{safe_html(sender_name)}</b>"
+
+        deleted_at = utc_now()
+        lifetime = max(0, deleted_at - sent_at) if sent_at else None
+        lifetime_text = (
+            f"прожило {lifetime} сек"
+            if lifetime is not None
+            else "время неизвестно"
+        )
+        time_text = datetime.fromtimestamp(
+            deleted_at, tz=timezone.utc
+        ).astimezone().strftime("%H:%M")
+
+        body_quote = ""
+        if body.strip() and body.strip() not in {
+            "[Фотография]", "[Видео]", "[Голосовое сообщение]",
+            "[Видеосообщение]", "[Документ]", "[GIF/анимация]",
+            "[Аудио]", "[Стикер]", "[Вложение]",
+            "[Сообщение без текста]",
+        }:
+            body_quote = (
+                f"\n\n<blockquote>{safe_html(truncate(body, 2500))}</blockquote>"
+            )
+
         text = (
-            "🗑 <b>Сообщение удалено</b>\n\n"
-            f"👤 Отправитель: {safe_html(sender)}\n\n"
-            + quoted_text("📝 Оригинал", body, 2500)
-            + f"📅 Отправлено: {fmt_time(sent_at)}\n\n"
-            + f"🕒 Удалено: {fmt_time(utc_now())}"
+            "🗑 <b>Удалённое сообщение</b>\n"
+            f"От: {author} · ⏱ {lifetime_text} · {time_text}"
+            f"{body_quote}\n\n"
+            "@infinitysaving_bot"
         )
 
         try:
