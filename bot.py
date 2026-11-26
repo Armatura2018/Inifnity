@@ -20,7 +20,6 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import Command
-from aiogram.types import LinkPreviewOptions
 from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
@@ -125,9 +124,8 @@ def sender_details(message: Message) -> tuple[str, str | None, int | None]:
 
 
 def is_owner_message(message: Message, owner_id: int) -> bool:
-    """Business messages authored by the account that owns the connection."""
-    _, _, sender_id = sender_details(message)
-    return sender_id == owner_id
+    """True only when Telegram identifies the connected account as the sender."""
+    return message.from_user is not None and message.from_user.id == owner_id
 
 
 def message_body(message: Message) -> str:
@@ -546,12 +544,17 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
     if not connection_id:
         return
     connection = await get_connection(connection_id)
-    if not connection or not connection["is_enabled"]:
+    if not connection:
+        log.warning("Edited Business message belongs to an unknown connection")
+        return
+    if not connection["is_enabled"]:
+        log.warning("Edited Business message ignored: Business connection is disabled")
         return
 
     owner_id = int(connection["owner_id"])
-    # Ignore edits to the owner's own outgoing Business messages.
+    # Ignore only messages Telegram explicitly attributes to the connected owner.
     if is_owner_message(message, owner_id):
+        log.info("Edited Business message ignored because sender is the connection owner")
         return
     chat_id = message.chat.id
     message_id = message.message_id
@@ -565,6 +568,11 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
 
     new_body = message_body(message)
     old_body = old["body"] if old else ""
+    if old is None:
+        log.warning(
+            "Edited Business message has no archived original: connection=%s chat=%s message=%s",
+            connection_id, chat_id, message_id,
+        )
     edit_time = int(message.edit_date.timestamp()) if message.edit_date else utc_now()
     fingerprint = hashlib.sha256(new_body.encode("utf-8", "replace")).hexdigest()[:16]
     event_key = f"edit:{connection_id}:{chat_id}:{message_id}:{edit_time}:{fingerprint}"
@@ -837,6 +845,14 @@ async def on_business_connection(connection: BusinessConnection) -> None:
 
 async def on_business_message(message: Message, bot: Bot) -> None:
     try:
+        log.info(
+            "Received business_message: connection=%s chat=%s message=%s from_user=%s sender_chat=%s",
+            message.business_connection_id,
+            message.chat.id,
+            message.message_id,
+            message.from_user.id if message.from_user else None,
+            message.sender_chat.id if message.sender_chat else None,
+        )
         await save_business_message(bot, message)
     except Exception as exc:
         log.exception("Could not archive Business message (%s)", type(exc).__name__)
@@ -844,6 +860,15 @@ async def on_business_message(message: Message, bot: Bot) -> None:
 
 async def on_edited_business_message(message: Message, bot: Bot) -> None:
     try:
+        log.info(
+            "Received edited_business_message: connection=%s chat=%s message=%s from_user=%s sender_chat=%s edit_date=%s",
+            message.business_connection_id,
+            message.chat.id,
+            message.message_id,
+            message.from_user.id if message.from_user else None,
+            message.sender_chat.id if message.sender_chat else None,
+            message.edit_date,
+        )
         await handle_edited_message(bot, message)
     except Exception as exc:
         log.exception("Could not process edited Business message (%s)", type(exc).__name__)
@@ -897,7 +922,13 @@ async def main() -> None:
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(
             bot,
-            allowed_updates=dp.resolve_used_update_types(),
+            allowed_updates=[
+                "message",
+                "business_connection",
+                "business_message",
+                "edited_business_message",
+                "deleted_business_messages",
+            ],
             close_bot_session=True,
         )
     finally:
