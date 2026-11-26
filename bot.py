@@ -124,6 +124,12 @@ def sender_details(message: Message) -> tuple[str, str | None, int | None]:
     return "Неизвестный отправитель", None, None
 
 
+def is_owner_message(message: Message, owner_id: int) -> bool:
+    """Business messages authored by the account that owns the connection."""
+    _, _, sender_id = sender_details(message)
+    return sender_id == owner_id
+
+
 def message_body(message: Message) -> str:
     # Store only actual text/caption. Media-only messages must not create
     # artificial placeholders in edit/delete notifications.
@@ -237,6 +243,38 @@ async def db_fetchall(query: str, params: tuple = ()) -> list[aiosqlite.Row]:
         rows = await cursor.fetchall()
         await cursor.close()
         return rows
+
+
+async def purge_owner_messages() -> None:
+    """Remove previously archived outgoing messages and their local media copies."""
+    rows = await db_fetchall(
+        """
+        SELECT m.media_path
+        FROM messages AS m
+        JOIN business_connections AS c
+          ON c.connection_id = m.connection_id
+        WHERE m.sender_id = c.owner_id
+        """
+    )
+    for row in rows:
+        path = row["media_path"]
+        if path:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                log.warning("Could not remove an old owner-message media copy")
+
+    await db_execute(
+        """
+        DELETE FROM messages
+        WHERE EXISTS (
+            SELECT 1
+            FROM business_connections AS c
+            WHERE c.connection_id = messages.connection_id
+              AND c.owner_id = messages.sender_id
+        )
+        """
+    )
 
 
 async def remember_user(user_id: int, username: str | None, first_name: str | None) -> None:
@@ -373,6 +411,10 @@ async def save_business_message(bot: Bot, message: Message) -> None:
         return
 
     owner_id = int(connection["owner_id"])
+    # Never archive messages sent by the owner of this Business connection.
+    if is_owner_message(message, owner_id):
+        return
+
     chat_id = message.chat.id
     message_id = message.message_id
     old = await db_fetchone(
@@ -508,6 +550,9 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
         return
 
     owner_id = int(connection["owner_id"])
+    # Ignore edits to the owner's own outgoing Business messages.
+    if is_owner_message(message, owner_id):
+        return
     chat_id = message.chat.id
     message_id = message.message_id
     old = await db_fetchone(
@@ -594,6 +639,10 @@ async def handle_deleted_messages(
             """,
             (owner_id, connection_id, chat_id, message_id),
         )
+
+        # Ignore owner messages left in the database by an older version.
+        if row and row["sender_id"] == owner_id:
+            continue
 
         if row:
             sender_name = row["sender_name"] or "Неизвестный пользователь"
@@ -817,6 +866,7 @@ async def on_deleted_business_messages(
 
 async def main() -> None:
     await init_db()
+    await purge_owner_messages()
 
     bot = Bot(
         token=BOT_TOKEN,
