@@ -578,7 +578,13 @@ async def handle_edited_message(bot: Bot, message: Message) -> None:
     old_body = old["body"] if old else ""
     if old is None:
         log.warning("Edited message was not found in archive; sending notification without old version")
-    edit_time = int(message.edit_date.timestamp()) if message.edit_date else utc_now()
+    # aiogram/model versions may expose edit_date as either datetime or Unix int.
+    if message.edit_date is None:
+        edit_time = utc_now()
+    elif isinstance(message.edit_date, datetime):
+        edit_time = int(message.edit_date.timestamp())
+    else:
+        edit_time = int(message.edit_date)
     fingerprint = hashlib.sha256(new_body.encode("utf-8", "replace")).hexdigest()[:16]
     event_key = f"edit:{connection_id}:{chat_id}:{message_id}:{edit_time}:{fingerprint}"
 
